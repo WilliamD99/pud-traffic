@@ -1,0 +1,112 @@
+name: Deploy Traffic Director
+
+on:
+  # Auto-deploy after successful build-and-push on main
+  workflow_run:
+    workflows: ["Build and Push Docker Image"]
+    types: [completed]
+    branches: [main]
+
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Docker image tag to deploy (default: latest)"
+        required: false
+        default: "latest"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  CONTAINER_NAME: traffic-director
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Only run if triggered manually OR if the upstream build succeeded
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    environment: AWS
+
+    steps:
+      - name: Set image tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=latest" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy container to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOMAIN: ${{ secrets.DOMAIN }}
+          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          # Setup SSH
+          mkdir -p ~/.ssh
+          echo "$VPS_SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -p ${VPS_PORT:-22} "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+          IMAGE="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+          APP_URL="https://traffic.${DOMAIN}"
+
+          ssh -p ${VPS_PORT:-22} ${VPS_USER}@${VPS_HOST} << REMOTE_SCRIPT
+            set -euo pipefail
+
+            # Login to GHCR
+            echo "${GHCR_TOKEN}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            # Pull latest image
+            docker pull "${IMAGE}"
+
+            # Stop and remove existing container
+            docker stop "${CONTAINER_NAME}" 2>/dev/null || true
+            docker rm "${CONTAINER_NAME}" 2>/dev/null || true
+
+            # Run new container with Traefik routing for traffic.DOMAIN
+            docker run -d \
+              --name "${CONTAINER_NAME}" \
+              --network payload-pud-network \
+              --restart unless-stopped \
+              --label "traefik.enable=true" \
+              --label "traefik.http.routers.${CONTAINER_NAME}.rule=Host(\\\`traffic.${DOMAIN}\\\`)" \
+              --label "traefik.http.routers.${CONTAINER_NAME}.tls=true" \
+              --label "traefik.http.routers.${CONTAINER_NAME}.tls.certresolver=letsencrypt" \
+              --label "traefik.http.services.${CONTAINER_NAME}.loadbalancer.server.port=8000" \
+              -e TD_DEBUG=false \
+              -e TD_HOST=0.0.0.0 \
+              -e TD_PORT=8000 \
+              "${IMAGE}"
+
+            # Cleanup old images
+            docker image prune -f
+
+            echo "✅ Deployed ${CONTAINER_NAME}"
+            echo "🌐 URL: ${APP_URL}"
+          REMOTE_SCRIPT
+
+          # Cleanup
+          rm -f ~/.ssh/id_rsa
+
+      - name: Deployment Summary
+        env:
+          DOMAIN: ${{ secrets.DOMAIN }}
+        run: |
+          echo "## 🚀 Traffic Director Deployed!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **URL** | https://traffic.${DOMAIN} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Container** | ${{ env.CONTAINER_NAME }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Image** | ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Network** | payload-pud-network |" >> $GITHUB_STEP_SUMMARY
