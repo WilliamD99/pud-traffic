@@ -39,8 +39,13 @@ jobs:
             echo "tag=latest" >> $GITHUB_OUTPUT
           fi
 
+      - name: Set image name (lowercase for Docker/GHCR)
+        id: image
+        run: echo "name=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
       - name: Deploy container to VPS
         env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
@@ -108,5 +113,5 @@ jobs:
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| **URL** | https://traffic.${DOMAIN} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Container** | ${{ env.CONTAINER_NAME }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Image** | ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Image** | ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:${{ steps.tag.outputs.tag }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Network** | payload-pud-network |" >> $GITHUB_STEP_SUMMARY
